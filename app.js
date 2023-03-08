@@ -1,67 +1,165 @@
-//jshint esversion:6
-require("dotenv").config();
-const express = require ("express");
-const bodyParser = require ("body-parser");
-const ejs = require ("ejs");
-const mongoose = require("mongoose");
-const encrypt = require("mongoose-encryption");
+const express=require("express")
+const app=express()
+const ejs=require("ejs")
+const mongoose=require("mongoose")
+const bcrypt=require("bcrypt")
+const session=require("express-session")
+const passport=require("passport")
+const LocalStrategy=require("passport-local").Strategy;
+app.use(express.urlencoded({extended:false}))  //Not using bodyParser, using Express in-built body parser instead
+app.set("view engine","ejs")
+app.use(express.static("public"))
 
-const app = express();
-console.log(process.env.API_KEY);
+app.use(session({
+    secret:"Onyx zaebav.",
+    resave:false,
+    saveUninitialized:false
+}))
 
-app.use(express.static("public"));
-app.set('view engine', 'ejs');
-app.use (bodyParser.urlencoded({
-    extended: true
-}));
+app.use(passport.initialize());
+app.use(passport.session());
 
-mongoose.connect("mongodb://127.0.0.1:27017/userDB");
+mongoose.connect("mongodb://127.0.0.1:27017/userDB")
+const userSchema= new mongoose.Schema({
+    username : String,
+    password : String,
+    secret: String
+})
 
-const userSchema = new mongoose.Schema({
-    email: String,
-    password: String
-});
+const User=new mongoose.model("User",userSchema)
 
-userSchema.plugin(encrypt, { secret: process.env.SECRET, encryptedFields: ['password'] });
+//Creating Local Strategy. passport-local-mongoose 3 lines of code for Strategy, 
+//Serialiazation, Deserialization not working due to recent changes in Mongoose 7
 
-const User = new mongoose.model("User", userSchema);
-
-app.get("/", function(req, res){
-    res.render("home")
-});
-
-app.get("/login", function(req, res){
-    res.render("login")
-});
-
-app.get("/register", function(req, res){
-    res.render("register")
-});
-
-app.post ("/register", async function(req, res){
+passport.use(new LocalStrategy((username,password,done)=>{  //done is a callback function
     try{
-    const newUser = new User({
-        email: req.body.username,
-        password: req.body.password
-    });
-    await newUser.save();
-    res.render("secrets")
-} catch(error) {
-    console.log(error)
-}});
+        User.findOne({username:username}).then(user=>{
+            if (!user){
+                return done(null,false, {message:"Incorrect Username"})
+            }
+ //using bcrypt to encrypt passoword in register post route and compare function in login post round. 
+ //login post route will check here during authentication so need to use compare here  
+            bcrypt.compare(password,user.password,function(err,result){ 
+                if (err){
+                    return done(err)
+                }
 
-app.post("/login", async function(req, res){
-    const username = req.body.username;
-    const password = req.body.password;
-    
-    const foundUser = await User.findOne({email: username}).catch(error => console.log((String(error))));
-    if (foundUser.password === password){
-        res.render("secrets")
-    } else {
-        
+                if (result) {
+                    return done(null,user)
+                }
+                else {
+                    return done (null,false, {message:"Incorrect Password"})
+                }
+            })
+
+        })
     }
+    catch (err){
+            return done(err)
+    }
+
+}))
+//serialize user
+passport.serializeUser(function(user, done) {
+    done(null, user.id);
+  });
+  
+//deserialize user  
+passport.deserializeUser(function(id, done) {
+    console.log("Deserializing User")
+    try {
+        User.findById(id).then(user=>{
+            done(null,user);
+        })
+    }
+    catch (err){
+        done(err);
+    }
+  });
+
+
+//get routes
+app.get("/",function(req,res){
+    res.render("home")
+})
+
+app.get("/login",function(req,res){
+    res.render("login")
+})
+
+app.get("/register",function(req,res){
+    res.render("register")
+})
+
+app.get("/secrets",function(req,res){
+    User.find({"secret": {$ne: null}}, function(err, foundUsers){
+        if (err){
+          console.log(err);
+        } else {
+          if (foundUsers) {
+            res.render("secrets", {usersWithSecrets: foundUsers});
+          }
+        }
+      });
+    });
+
+app.get("/logout",function(req,res){
+    req.logout(function(err){
+        if(err){
+            console.log(err)
+        }
+        res.redirect("/");
+      });
+    });
+
+app.get("/submit", function(req, res){
+    if (req.isAuthenticated()){
+        res.render("submit")
+    }
+    else {
+        res.redirect("/login")
+    };
 });
 
-app.listen (3000, function(){
-    console.log ("App is running on port 3000")
-});
+//post routes
+app.post("/register",function(req,res){
+    bcrypt.hash(req.body.password,10,function(err,hash){  //10 is SaltRounds
+        if (err){
+            console.log(err)
+        }
+        const user= new User ({
+            username:req.body.username,
+            password:hash
+        })
+        user.save()
+
+        passport.authenticate('local')(req,res,()=>{res.redirect("/secrets")}) 
+    })
+})   
+
+app.post("/submit", function(req, res){
+    const submittedSecret = req.body.secret;
+  
+  //Once the user is authenticated and their session gets saved, their user details are saved to req.user.
+    // console.log(req.user.id);
+  
+    User.findById(req.user.id, function(err, foundUser){
+      if (err) {
+        console.log(err);
+      } else {
+        if (foundUser) {
+          foundUser.secret = submittedSecret;
+          foundUser.save(function(){
+            res.redirect("/secrets");
+          });
+        }
+      }
+    });
+  });
+
+app.post('/login', passport.authenticate('local', { successRedirect:"/secrets", failureRedirect: '/login' }));
+
+//listen
+app.listen(3000, ()=> {
+    console.log("Server Running on Port 3000")
+})
